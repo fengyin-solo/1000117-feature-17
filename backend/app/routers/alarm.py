@@ -6,28 +6,68 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.alarm import AlarmService
+from app.services.alarm import LEVEL_ORDER, STATUS_ORDER, AlarmService
 
 router = APIRouter(prefix="/api/alarm", tags=["告警中心"])
 
 service = AlarmService()
 
 LIST_FIELDS = ["告警编号", "告警类型", "告警等级", "触发设备", "触发时间", "处理状态", "处理人"]
-STATUSES = ["待确认", "已确认", "已处置", "已忽略"]
+STATUSES = STATUS_ORDER
+LEVELS = LEVEL_ORDER
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按告警编号检索"),
     status: str | None = Query(default=None, description="待确认、已确认、已处置、已忽略"),
+    level: str | None = Query(default=None, description="告警等级，如紧急、重要、次要"),
+    alarm_type: str | None = Query(default=None, description="告警类型，精确匹配"),
+    device: str | None = Query(default=None, description="按触发设备模糊检索"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按告警编号与状态过滤告警中心列表；没有数据时返回空页，不报错。"""
+    """按告警编号、状态、等级、类型与触发设备过滤告警列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        level=level,
+        alarm_type=alarm_type,
+        device=device,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/summary")
+def alarm_summary(
+    keyword: str | None = Query(default=None, description="按告警编号检索，与列表口径一致"),
+    status: str | None = Query(default=None, description="处理状态过滤，与列表口径一致"),
+    level: str | None = Query(default=None, description="告警等级过滤，与列表口径一致"),
+    alarm_type: str | None = Query(default=None, description="告警类型过滤，与列表口径一致"),
+    device: str | None = Query(default=None, description="触发设备过滤，与列表口径一致"),
+) -> dict[str, Any]:
+    """值班看板汇总：等级×状态矩阵与触发设备最多的告警类型。
+
+    筛选参数与列表接口保持一致，列表的等级条件切换后看板按同一口径汇总。
+    """
+    return service.summarize(
+        keyword=keyword,
+        status=status,
+        level=level,
+        alarm_type=alarm_type,
+        device=device,
+    )
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出告警中心清单：返回全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "alarm", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +96,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出告警中心清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "alarm", "total": total, "items": items}
