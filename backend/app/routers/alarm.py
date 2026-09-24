@@ -4,30 +4,66 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.alarm import AlarmService
+from app.services.alarm import AlarmService, LEVEL_ORDER, STATUS_ORDER
 
 router = APIRouter(prefix="/api/alarm", tags=["告警中心"])
 
 service = AlarmService()
 
 LIST_FIELDS = ["告警编号", "告警类型", "告警等级", "触发设备", "触发时间", "处理状态", "处理人"]
-STATUSES = ["待确认", "已确认", "已处置", "已忽略"]
+STATUSES = STATUS_ORDER
+LEVELS = LEVEL_ORDER
+
+
+class ActionPayload(BaseModel):
+    """动作请求体：兼容列表页直传 action 与统一的 values 包裹两种写法。"""
+
+    action: str | None = None
+    values: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按告警编号检索"),
     status: str | None = Query(default=None, description="待确认、已确认、已处置、已忽略"),
+    level: str | None = Query(default=None, description="紧急、重要、次要、提示"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按告警编号与状态过滤告警中心列表；没有数据时返回空页，不报错。"""
+    """按告警编号、状态与告警等级过滤告警中心列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    if status and status not in STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"处理状态仅支持：{'、'.join(STATUSES)}",
+        )
+    if level and level not in LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"告警等级仅支持：{'、'.join(LEVELS)}",
+        )
+    items, total = service.list_entries(
+        keyword=keyword, status=status, level=level, page=page, size=size
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/summary")
+def board_summary(
+    keyword: str | None = Query(default=None, description="按告警编号检索，与列表条件一致"),
+    level: str | None = Query(default=None, description="紧急、重要、次要、提示"),
+) -> dict[str, Any]:
+    """值班看板汇总：返回告警等级×处理状态矩阵，以及触发设备最多的告警类型。"""
+    if level and level not in LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"告警等级仅支持：{'、'.join(LEVELS)}",
+        )
+    return service.board_summary(keyword=keyword, level=level)
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -49,9 +85,9 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
+def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     """对单条告警事件执行确认告警、处置告警、忽略告警；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
+    action = str(payload.action or payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
         return ActionResult(ok=False, message=message)
